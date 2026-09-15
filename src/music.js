@@ -11,6 +11,53 @@ if (!fs.existsSync(config.tempFolder)) {
 }
 
 /**
+ * Parse Netscape cookies file ke format yang dimengerti ytdl-core
+ */
+function parseCookiesFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines = content.split('\n');
+    const cookies = [];
+
+    for (const line of lines) {
+      // Skip comment dan empty line
+      if (line.startsWith('#') || line.trim() === '') continue;
+
+      const parts = line.split('\t');
+      if (parts.length >= 7) {
+        cookies.push({
+          name: parts[5],
+          value: parts[6],
+          domain: parts[0],
+          path: parts[2],
+          secure: parts[3] === 'TRUE',
+          expires: parseInt(parts[4]) || -1,
+        });
+      }
+    }
+
+    console.log(`[COOKIES] Loaded ${cookies.length} cookies`);
+    return cookies.length > 0 ? cookies : null;
+  } catch (err) {
+    console.error(`[COOKIES ERROR] ${err.message}`);
+    return null;
+  }
+}
+
+// Load cookies sekali saat startup
+const cookiesFile = path.resolve('./cookies/cookies_netscape.txt');
+const cookies = parseCookiesFile(cookiesFile);
+const agent = cookies ? ytdl.createAgent(cookies) : null;
+
+if (agent) {
+  console.log('[COOKIES] Agent created - YouTube bot detection bypassed!');
+} else {
+  console.log('[COOKIES] No cookies found - download might fail!');
+}
+
+/**
  * Fetch URL dan return JSON
  */
 function fetchJSON(url) {
@@ -146,14 +193,24 @@ async function downloadAudio(query) {
   const filename = `audio_${Date.now()}_${videoInfo.id}.mp3`;
   const filePath = path.join(config.tempFolder, filename);
 
-  // Step 4: Download audio pake ytdl-core
+  // Step 4: Download audio pake ytdl-core + cookies
   console.log(`[DOWNLOAD] Downloading: ${videoInfo.title}`);
 
-  const stream = ytdl(videoInfo.url, {
+  const ytdlOptions = {
     quality: 'highestaudio',
     filter: 'audioonly',
     dlChunkSize: 0,
-  });
+  };
+
+  // Tambahkan agent (cookies) kalau ada
+  if (agent) {
+    ytdlOptions.agent = agent;
+    console.log('[DOWNLOAD] Using cookies agent');
+  } else {
+    console.log('[DOWNLOAD] No cookies - might fail!');
+  }
+
+  const stream = ytdl(videoInfo.url, ytdlOptions);
 
   const writable = fs.createWriteStream(filePath);
 
