@@ -1,0 +1,9 @@
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+temp/
+cookies/*.txt
+.env
+package-lock.json
+.env
+cookies/*.txt

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bot-wa-music
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PREFIX
+        value: .
+      - key: MAX_DURATION
+        value: 600
+      - key: PORT
+        sync: false
+        value: 3000
