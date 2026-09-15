@@ -3,4 +3,3 @@ node_modules/
 .wwebjs_cache/
 temp/
 .env
-package-lock.json

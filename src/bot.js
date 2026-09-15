@@ -30,27 +30,40 @@ function getBotStatus() {
  * Inisialisasi WhatsApp Client
  */
 function createClient() {
-  // Pake Chromium yang udah terinstall di sistem (hemat internet!)
-  const CHROME_PATH = process.env.CHROME_PATH || '/snap/bin/chromium';
+  // Auto-detect: Render atau Local?
+  const isRender = !!process.env.RENDER; // Render auto-set this env var
+
+  // Puppeteer config
+  const puppeteerConfig = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+    ],
+  };
+
+  // Kalau LOCAL (bukan Render), pake Chrome yang udah terinstall
+  if (!isRender) {
+    const CHROME_PATH = process.env.CHROME_PATH || '/snap/bin/chromium';
+    puppeteerConfig.executablePath = CHROME_PATH;
+    console.log(`[CHROME] Local mode - Using: ${CHROME_PATH}`);
+  } else {
+    // Kalau RENDER, biarin Puppeteer pake Chromium bawaannya
+    console.log('[CHROME] Render mode - Using Puppeteer bundled Chromium');
+  }
 
   const client = new Client({
     authStrategy: new LocalAuth({
       dataPath: './.wwebjs_auth',
     }),
-    puppeteer: {
-      headless: true,
-      executablePath: CHROME_PATH,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-      ],
-    },
+    puppeteer: puppeteerConfig,
   });
 
   return client;

@@ -4,14 +4,15 @@
   "description": "WhatsApp Bot - Play Music from YouTube",
   "main": "index.js",
   "scripts": {
-    "start": "PUPPETEER_SKIP_DOWNLOAD=true node index.js",
-    "dev": "PUPPETEER_SKIP_DOWNLOAD=true node --watch index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
     "whatsapp-web.js": "^1.26.0",
     "qrcode-terminal": "^0.12.0",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "puppeteer": "^23.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
