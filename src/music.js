@@ -1,3 +1,4 @@
+const YouTube = require('youtube-sr');
 const ytdl = require('@distube/ytdl-core');
 const path = require('path');
 const fs = require('fs');
@@ -9,26 +10,29 @@ if (!fs.existsSync(config.tempFolder)) {
 }
 
 /**
- * Cari info video dari YouTube berdasarkan query
- * Pake ytdl-core (Node.js native, gak perlu yt-dlp!)
+ * Cari video di YouTube berdasarkan query
+ * Pake youtube-sr (search engine untuk YouTube)
  */
 async function searchYouTube(query) {
   try {
-    // Cari video pake ytdl
-    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-    const info = await ytdl.getInfo(searchUrl);
+    console.log(`[SEARCH] Mencari: ${query}`);
 
-    if (!info || !info.videoDetails) {
+    // Cari video pake youtube-sr
+    const results = await YouTube.search(query, { limit: 1, safeSearch: true });
+
+    if (!results || results.length === 0) {
       throw new Error('Gak ada hasil ditemukan untuk query itu, Bro!');
     }
 
-    const details = info.videoDetails;
+    const video = results[0];
+    console.log(`[SEARCH] Ditemukan: ${video.title} (${video.durationFormatted})`);
+
     return {
-      id: details.videoId,
-      title: details.title,
-      duration: parseInt(details.lengthSeconds) || 0,
-      thumbnail: details.thumbnails?.[0]?.url || '',
-      url: details.videoUrl || `https://www.youtube.com/watch?v=${details.videoId}`,
+      id: video.id,
+      title: video.title || 'Unknown',
+      duration: video.duration || 0,
+      thumbnail: video.thumbnail?.url || video.thumbnails?.[0]?.url || '',
+      url: `https://www.youtube.com/watch?v=${video.id}`,
     };
   } catch (err) {
     throw new Error(`Gagal cari video: ${err.message}`);
@@ -36,7 +40,7 @@ async function searchYouTube(query) {
 }
 
 /**
- * Download audio dari YouTube pake ytdl-core
+ * Download audio dari YouTube
  */
 async function downloadAudio(query) {
   // Step 1: Cari video dulu
@@ -52,9 +56,9 @@ async function downloadAudio(query) {
   const filePath = path.join(config.tempFolder, filename);
 
   // Step 4: Download audio pake ytdl-core
-  const videoUrl = `https://www.youtube.com/watch?v=${videoInfo.id}`;
+  console.log(`[DOWNLOAD] Downloading: ${videoInfo.title}`);
 
-  const stream = ytdl(videoUrl, {
+  const stream = ytdl(videoInfo.url, {
     quality: 'highestaudio',
     filter: 'audioonly',
     dlChunkSize: 0,
@@ -67,11 +71,10 @@ async function downloadAudio(query) {
     stream.pipe(writable);
 
     writable.on('finish', () => {
-      // Cek file exist dan ada isinya
       if (fs.existsSync(filePath)) {
         const stats = fs.statSync(filePath);
         if (stats.size > 0) {
-          console.log(`[DOWNLOAD] File saved: ${filePath} (${stats.size} bytes)`);
+          console.log(`[DOWNLOAD] Selesai: ${videoInfo.title} (${stats.size} bytes)`);
           resolve({
             filePath,
             title: videoInfo.title,
