@@ -292,15 +292,18 @@ app.listen(PORT, '0.0.0.0', () => {
 
 console.log('\n🚀 Starting WhatsApp Music Bot...\n');
 
-// Inisialisasi client
-whatsappClient = createClient();
-
-// Setup semua event handler & message handler
-setupBot(whatsappClient);
-
-// Mulai koneksi ke WhatsApp
-console.log('📡 Menghubungkan ke WhatsApp...\n');
-whatsappClient.initialize();
+// Inisialisasi client (async karena butuh Chromium path)
+(async () => {
+  try {
+    whatsappClient = await createClient();
+    setupBot(whatsappClient);
+    console.log('📡 Menghubungkan ke WhatsApp...\n');
+    await whatsappClient.initialize();
+  } catch (err) {
+    console.error('❌ Gagal inisialisasi bot:', err.message);
+    process.exit(1);
+  }
+})();
 
 // ═══════════════════════════════════════════════
 // GRACEFUL SHUTDOWN
