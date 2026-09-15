@@ -12,6 +12,7 @@ let botStatus = {
   state: 'initializing',
   pairingCode: null,
   qr: null,
+  qrImage: null,
   uptime: 0,
   lastActivity: null,
 };
@@ -35,7 +36,7 @@ async function startBot() {
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`[WA] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
-  // Buat socket
+  // Buat socket - JANGAN print QR di terminal (Render gak support)
   const sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
@@ -43,7 +44,7 @@ async function startBot() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    printQRInTerminal: false, // Kita pake pairing code, bukan QR
+    printQRInTerminal: false,
     generateHighQualityLinkPreview: false,
   });
 
@@ -57,9 +58,9 @@ async function startBot() {
     if (qr) {
       botStatus.state = 'qr';
       botStatus.qr = qr;
-      console.log('\n📱 QR Code available - Scan via WhatsApp!');
-      const qrcode = require('qrcode-terminal');
-      qrcode.generate(qr, { small: true });
+      // Generate QR image URL pake API gratis
+      botStatus.qrImage = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`;
+      console.log('[WA] QR Code generated - check web page to scan!');
     }
 
     if (connection === 'close') {
@@ -67,8 +68,11 @@ async function startBot() {
       console.log(`[WA] Connection closed. Reason: ${reason}`);
 
       if (reason !== DisconnectReason.loggedOut) {
-        console.log('[WA] Reconnecting...');
+        console.log('[WA] Reconnecting in 3 seconds...');
         botStatus.state = 'reconnecting';
+        botStatus.qr = null;
+        botStatus.qrImage = null;
+        botStatus.pairingCode = null;
         setTimeout(() => startBot(), 3000);
       } else {
         console.log('[WA] Logged out. Delete .wwebjs_auth and restart.');
@@ -83,6 +87,9 @@ async function startBot() {
 
     if (connection === 'open') {
       botStatus.state = 'ready';
+      botStatus.qr = null;
+      botStatus.qrImage = null;
+      botStatus.pairingCode = null;
       botStatus.lastActivity = new Date().toISOString();
       console.log('═══════════════════════════════════════');
       console.log('  🎵 BOT WHATSAPP MUSIC SIAP! 🎵');
