@@ -7,38 +7,32 @@ if (!fs.existsSync(config.tempFolder)) {
   fs.mkdirSync(config.tempFolder, { recursive: true });
 }
 
-const YT_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function postJSON(url, body) {
+function httpGet(url) {
   return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const req = https.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
+    const req = https.get(url, {
+      headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
       timeout: 30000,
     }, (res) => {
-      let buf = '';
-      res.on('data', (c) => buf += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(buf)); }
-        catch (e) { reject(new Error('Parse error: ' + buf.substring(0, 200))); }
-      });
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        return httpGet(res.headers.location).then(resolve).catch(reject);
+      }
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => resolve(data));
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-    req.write(data);
-    req.end();
   });
 }
 
-function downloadFile(url, filePath, maxRedirects = 5) {
+function downloadFile(url, filePath, maxRedirects = 10) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : require('http');
-    client.get(url, { timeout: 120000, headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': UA },
+      timeout: 120000,
+    }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && maxRedirects > 0) {
         return downloadFile(res.headers.location, filePath, maxRedirects - 1).then(resolve).catch(reject);
       }
@@ -47,101 +41,132 @@ function downloadFile(url, filePath, maxRedirects = 5) {
       }
       const ws = fs.createWriteStream(filePath);
       res.pipe(ws);
-      ws.on('finish', () => { ws.close(); resolve(filePath); });
+      ws.on('finish', () => { ws.close(); resolve(); });
       ws.on('error', reject);
-    }).on('error', reject);
+    });
+    req.on('error', reject);
   });
 }
 
 async function searchYouTube(query) {
   console.log(`[SEARCH] Mencari: ${query}`);
 
-  const data = await postJSON(
-    `https://www.youtube.com/youtubei/v1/search?key=${YT_KEY}`,
-    {
-      context: { client: { clientName: 'WEB', clientVersion: '2.20240101.00.00', hl: 'en', gl: 'US' } },
-      query,
-    }
-  );
+  // Pake YouTube search page langsung
+  const html = await httpGet(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%3D%3D`);
 
-  const items = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents;
-  if (!items) throw new Error('Gak ada hasil');
+  // Extract video IDs dari HTML
+  const videoIdRegex = /"videoId":"([a-zA-Z0-9_-]{11})"/g;
+  const titleRegex = /"title":\{"runs":\[\{"text":"([^"]+)"/g;
 
-  for (const item of items) {
-    const v = item.videoRenderer;
-    if (v?.videoId) {
-      const dur = v.lengthText?.simpleText || '0:00';
-      const parts = dur.split(':');
-      let secs = 0;
-      if (parts.length === 2) secs = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-      else if (parts.length === 3) secs = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+  const videoIds = [];
+  const titles = [];
+  let match;
 
-      const title = v.title?.runs?.[0]?.text || 'Unknown';
-      console.log(`[SEARCH] Ditemukan: ${title} (${dur})`);
-
-      return {
-        id: v.videoId,
-        title,
-        duration: secs,
-        thumbnail: v.thumbnail?.thumbnails?.slice(-1)?.[0]?.url || '',
-        url: `https://www.youtube.com/watch?v=${v.videoId}`,
-      };
-    }
+  while ((match = videoIdRegex.exec(html)) !== null) {
+    if (!videoIds.includes(match[1])) videoIds.push(match[1]);
   }
-  throw new Error('Gak ada video');
+  while ((match = titleRegex.exec(html)) !== null) {
+    if (!titles.includes(match[1])) titles.push(match[1]);
+  }
+
+  if (videoIds.length === 0) {
+    throw new Error('Gak ada hasil ditemukan');
+  }
+
+  const id = videoIds[0];
+  const title = titles[0] || 'Unknown';
+  console.log(`[SEARCH] Ditemukan: ${title} (ID: ${id})`);
+
+  return {
+    id,
+    title,
+    duration: 0,
+    url: `https://www.youtube.com/watch?v=${id}`,
+  };
 }
 
 async function downloadAudio(query) {
   const video = await searchYouTube(query);
-
-  if (video.duration > config.maxDuration) {
-    throw new Error(`Lagu terlalu panjang (${video.duration}s). Max ${config.maxDuration}s`);
-  }
-
   const filename = `audio_${Date.now()}_${video.id}.mp3`;
   const filePath = path.join(config.tempFolder, filename);
 
-  console.log(`[DOWNLOAD] Getting player info: ${video.title}`);
+  console.log(`[DOWNLOAD] Trying get_video_info: ${video.id}`);
 
-  // Step 1: Get video player info
-  const player = await postJSON(
-    `https://www.youtube.com/youtubei/v1/player?key=${YT_KEY}`,
-    {
-      context: { client: { clientName: 'ANDROID', clientVersion: '19.09.37', androidSdkVersion: 30, hl: 'en', gl: 'US' } },
-      videoId: video.id,
+  try {
+    // Method 1: get_video_info endpoint (older, less protected)
+    const infoUrl = `https://www.youtube.com/get_video_info?video_id=${video.id}&el=embedded&eurl=https://www.youtube.com/&hl=en`;
+    const infoData = await httpGet(infoUrl);
+    const params = new URLSearchParams(infoData);
+    const playerResponse = JSON.parse(params.get('player_response') || '{}');
+
+    const formats = playerResponse?.streamingData?.adaptiveFormats;
+    if (formats) {
+      const audio = formats
+        .filter(f => f.mimeType?.startsWith('audio/'))
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+      if (audio?.url) {
+        console.log(`[DOWNLOAD] Found audio: ${audio.mimeType}`);
+        await downloadFile(audio.url, filePath);
+        const stats = fs.statSync(filePath);
+        console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
+        return { filePath, title: video.title, duration: video.duration, url: video.url };
+      }
     }
-  );
 
-  const formats = player?.streamingData?.adaptiveFormats;
-  if (!formats || formats.length === 0) {
-    const reason = player?.playabilityStatus?.reason || 'Gak ada format tersedia';
-    throw new Error(reason);
-  }
+    throw new Error('No audio format in get_video_info');
+  } catch (e1) {
+    console.log(`[DOWNLOAD] Method 1 failed: ${e1.message}, trying Method 2...`);
 
-  // Step 2: Cari audio format terbaik
-  const audioFormat = formats
-    .filter(f => f.mimeType?.startsWith('audio/'))
-    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    try {
+      // Method 2: Watch page
+      const watchHtml = await httpGet(video.url);
+      const configMatch = watchHtml.match(/var ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
+      if (configMatch) {
+        const player = JSON.parse(configMatch[1]);
+        const formats = player?.streamingData?.adaptiveFormats;
+        if (formats) {
+          const audio = formats
+            .filter(f => f.mimeType?.startsWith('audio/'))
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
-  if (!audioFormat?.url) {
-    throw new Error('Gak ada audio URL tersedia');
-  }
+          if (audio?.url) {
+            console.log(`[DOWNLOAD] Found audio via watch page`);
+            await downloadFile(audio.url, filePath);
+            const stats = fs.statSync(filePath);
+            console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
+            return { filePath, title: video.title, duration: video.duration, url: video.url };
+          }
+        }
+      }
+      throw new Error('No audio in watch page');
+    } catch (e2) {
+      console.log(`[DOWNLOAD] Method 2 failed: ${e2.message}, trying Method 3...`);
 
-  console.log(`[DOWNLOAD] Audio format: ${audioFormat.mimeType} (${audioFormat.bitrate}bps)`);
-  console.log(`[DOWNLOAD] Downloading audio...`);
+      try {
+        // Method 3: Embed page
+        const embedHtml = await httpGet(`https://www.youtube.com/embed/${video.id}`);
+        const embedMatch = embedHtml.match(/"adaptiveFormats":(\[.+?\])/);
+        if (embedMatch) {
+          const formats = JSON.parse(embedMatch[1]);
+          const audio = formats
+            .filter(f => f.mimeType?.startsWith('audio/'))
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
-  // Step 3: Download audio
-  await downloadFile(audioFormat.url, filePath);
-
-  if (fs.existsSync(filePath)) {
-    const stats = fs.statSync(filePath);
-    if (stats.size > 0) {
-      console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
-      return { filePath, title: video.title, duration: video.duration, url: video.url };
+          if (audio?.url) {
+            console.log(`[DOWNLOAD] Found audio via embed page`);
+            await downloadFile(audio.url, filePath);
+            const stats = fs.statSync(filePath);
+            console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
+            return { filePath, title: video.title, duration: video.duration, url: video.url };
+          }
+        }
+        throw new Error('No audio in embed page');
+      } catch (e3) {
+        throw new Error(`Semua method gagal. YouTube blocking download dari server ini.`);
+      }
     }
   }
-
-  throw new Error('File audio kosong');
 }
 
 function cleanupFile(filePath) {
