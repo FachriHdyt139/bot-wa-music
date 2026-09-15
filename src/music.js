@@ -7,16 +7,16 @@ if (!fs.existsSync(config.tempFolder)) {
   fs.mkdirSync(config.tempFolder, { recursive: true });
 }
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 
-function httpGet(url) {
+function httpGet(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
-      headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+      headers: { 'User-Agent': UA, ...headers },
       timeout: 30000,
     }, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        return httpGet(res.headers.location).then(resolve).catch(reject);
+        return httpGet(res.headers.location, headers).then(resolve).catch(reject);
       }
       let data = '';
       res.on('data', (c) => data += c);
@@ -51,10 +51,8 @@ function downloadFile(url, filePath, maxRedirects = 10) {
 async function searchYouTube(query) {
   console.log(`[SEARCH] Mencari: ${query}`);
 
-  // Pake YouTube search page langsung
   const html = await httpGet(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%3D%3D`);
 
-  // Extract video IDs dari HTML
   const videoIdRegex = /"videoId":"([a-zA-Z0-9_-]{11})"/g;
   const titleRegex = /"title":\{"runs":\[\{"text":"([^"]+)"/g;
 
@@ -90,82 +88,36 @@ async function downloadAudio(query) {
   const filename = `audio_${Date.now()}_${video.id}.mp3`;
   const filePath = path.join(config.tempFolder, filename);
 
-  console.log(`[DOWNLOAD] Trying get_video_info: ${video.id}`);
+  console.log(`[DOWNLOAD] Using RapidAPI for: ${video.title}`);
 
   try {
-    // Method 1: get_video_info endpoint (older, less protected)
-    const infoUrl = `https://www.youtube.com/get_video_info?video_id=${video.id}&el=embedded&eurl=https://www.youtube.com/&hl=en`;
-    const infoData = await httpGet(infoUrl);
-    const params = new URLSearchParams(infoData);
-    const playerResponse = JSON.parse(params.get('player_response') || '{}');
-
-    const formats = playerResponse?.streamingData?.adaptiveFormats;
-    if (formats) {
-      const audio = formats
-        .filter(f => f.mimeType?.startsWith('audio/'))
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
-      if (audio?.url) {
-        console.log(`[DOWNLOAD] Found audio: ${audio.mimeType}`);
-        await downloadFile(audio.url, filePath);
-        const stats = fs.statSync(filePath);
-        console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
-        return { filePath, title: video.title, duration: video.duration, url: video.url };
-      }
+    const rapidApiKey = process.env.RAPIDAPI_KEY;
+    if (!rapidApiKey) {
+      throw new Error('RAPIDAPI_KEY not set in .env');
     }
 
-    throw new Error('No audio format in get_video_info');
-  } catch (e1) {
-    console.log(`[DOWNLOAD] Method 1 failed: ${e1.message}, trying Method 2...`);
+    const apiUrl = `https://youtube-mp36.p.rapidapi.com/dl?id=${video.id}`;
+    const response = await httpGet(apiUrl, {
+      'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
+      'x-rapidapi-key': rapidApiKey,
+    });
 
-    try {
-      // Method 2: Watch page
-      const watchHtml = await httpGet(video.url);
-      const configMatch = watchHtml.match(/var ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
-      if (configMatch) {
-        const player = JSON.parse(configMatch[1]);
-        const formats = player?.streamingData?.adaptiveFormats;
-        if (formats) {
-          const audio = formats
-            .filter(f => f.mimeType?.startsWith('audio/'))
-            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    console.log(`[DOWNLOAD] RapidAPI response: ${response.substring(0, 200)}`);
 
-          if (audio?.url) {
-            console.log(`[DOWNLOAD] Found audio via watch page`);
-            await downloadFile(audio.url, filePath);
-            const stats = fs.statSync(filePath);
-            console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
-            return { filePath, title: video.title, duration: video.duration, url: video.url };
-          }
-        }
-      }
-      throw new Error('No audio in watch page');
-    } catch (e2) {
-      console.log(`[DOWNLOAD] Method 2 failed: ${e2.message}, trying Method 3...`);
+    const data = JSON.parse(response);
 
-      try {
-        // Method 3: Embed page
-        const embedHtml = await httpGet(`https://www.youtube.com/embed/${video.id}`);
-        const embedMatch = embedHtml.match(/"adaptiveFormats":(\[.+?\])/);
-        if (embedMatch) {
-          const formats = JSON.parse(embedMatch[1]);
-          const audio = formats
-            .filter(f => f.mimeType?.startsWith('audio/'))
-            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    if (data.link) {
+      console.log(`[DOWNLOAD] Got download link!`);
+      await downloadFile(data.link, filePath);
 
-          if (audio?.url) {
-            console.log(`[DOWNLOAD] Found audio via embed page`);
-            await downloadFile(audio.url, filePath);
-            const stats = fs.statSync(filePath);
-            console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
-            return { filePath, title: video.title, duration: video.duration, url: video.url };
-          }
-        }
-        throw new Error('No audio in embed page');
-      } catch (e3) {
-        throw new Error(`Semua method gagal. YouTube blocking download dari server ini.`);
-      }
+      const stats = fs.statSync(filePath);
+      console.log(`[DOWNLOAD] Selesai: ${video.title} (${stats.size} bytes)`);
+      return { filePath, title: video.title, duration: video.duration, url: video.url };
     }
+
+    throw new Error(data.error || 'No download link in response');
+  } catch (err) {
+    throw new Error(`Download gagal: ${err.message}`);
   }
 }
 
