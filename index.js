@@ -352,6 +352,100 @@ app.get('/health', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════
+// LOG SYSTEM - Detail error buat debug
+// ═══════════════════════════════════════════════
+
+const logs = [];
+const MAX_LOGS = 100;
+
+function addLog(level, message, details = null) {
+  const log = {
+    time: new Date().toISOString(),
+    level,
+    message,
+    details,
+  };
+  logs.unshift(log);
+  if (logs.length > MAX_LOGS) logs.pop();
+  return log;
+}
+
+// Intercept console.log/error
+const originalLog = console.log;
+const originalError = console.error;
+console.log = (...args) => {
+  addLog('info', args.join(' '));
+  originalLog.apply(console, args);
+};
+console.error = (...args) => {
+  addLog('error', args.join(' '));
+  originalError.apply(console, args);
+};
+
+// Log page
+app.get('/logs', (req, res) => {
+  const logEntries = logs.map(l => 
+    `[${l.time}] [${l.level.toUpperCase()}] ${l.message}${l.details ? '\n' + l.details : ''}`
+  ).join('\n\n');
+
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📋 Bot Logs</title>
+    <style>
+        body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+        h1 { color: #569cd6; }
+        pre { 
+            background: #2d2d2d; 
+            padding: 20px; 
+            border-radius: 8px; 
+            overflow-x: auto; 
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .btn {
+            background: #569cd6; color: white; padding: 10px 20px;
+            border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px;
+            font-size: 14px;
+        }
+        .btn:hover { background: #4a8bc2; }
+        .btn-copy { background: #4ec9b0; }
+        .btn-refresh { background: #dcdcaa; color: #1e1e1e; }
+        .info { color: #6a9955; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <h1>📋 Bot Logs</h1>
+    <p class="info">Total logs: ${logs.length} | Auto-refresh: OFF</p>
+    <button class="btn btn-refresh" onclick="location.reload()">🔄 Refresh</button>
+    <button class="btn btn-copy" onclick="copyLogs()">📋 Copy All Logs</button>
+    <button class="btn" onclick="clearLogs()">🗑️ Clear</button>
+    <pre id="log-content">${logEntries.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+    <script>
+        function copyLogs() {
+            const text = document.getElementById('log-content').textContent;
+            navigator.clipboard.writeText(text).then(() => alert('Logs copied!'));
+        }
+        function clearLogs() {
+            fetch('/api/clear-logs').then(() => location.reload());
+        }
+    </script>
+</body>
+</html>
+  `);
+});
+
+app.get('/api/clear-logs', (req, res) => {
+  logs.length = 0;
+  res.json({ status: 'cleared' });
+});
+
+// ═══════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════
 

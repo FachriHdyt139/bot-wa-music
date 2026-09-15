@@ -1,4 +1,5 @@
-const YouTube = require('youtube-sr');
+const https = require('https');
+const http = require('http');
 const ytdl = require('@distube/ytdl-core');
 const path = require('path');
 const fs = require('fs');
@@ -10,30 +11,120 @@ if (!fs.existsSync(config.tempFolder)) {
 }
 
 /**
- * Cari video di YouTube berdasarkan query
- * Pake youtube-sr (search engine untuk YouTube)
+ * Fetch URL dan return JSON
+ */
+function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    client.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      timeout: 15000,
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(new Error('Gagal parse response'));
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+/**
+ * Cari video di YouTube pake Innertube API (gratis, tanpa API key)
  */
 async function searchYouTube(query) {
   try {
     console.log(`[SEARCH] Mencari: ${query}`);
 
-    // Cari video pake youtube-sr
-    const results = await YouTube.search(query, { limit: 1, safeSearch: true });
+    // Pake YouTube Innertube API
+    const searchUrl = `https://www.youtube.com/youtubei/v1/search?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&q=${encodeURIComponent(query)}&type=video&videoCategory=10`;
 
-    if (!results || results.length === 0) {
-      throw new Error('Gak ada hasil ditemukan untuk query itu, Bro!');
+    const body = {
+      context: {
+        client: {
+          clientName: 'WEB',
+          clientVersion: '2.20240101.00.00',
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+      query: query,
+    };
+
+    // POST request ke YouTube API
+    const postData = JSON.stringify(body);
+
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request('https://www.youtube.com/youtubei/v1/search?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+        timeout: 15000,
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error('Gagal parse YouTube response'));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('YouTube API timeout'));
+      });
+
+      req.write(postData);
+      req.end();
+    });
+
+    // Parse hasil search
+    const contents = result?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents;
+
+    if (!contents || contents.length === 0) {
+      throw new Error('Gak ada hasil ditemukan');
     }
 
-    const video = results[0];
-    console.log(`[SEARCH] Ditemukan: ${video.title} (${video.durationFormatted})`);
+    // Cari video pertama
+    for (const item of contents) {
+      const video = item.videoRenderer;
+      if (video && video.videoId) {
+        const durationText = video.lengthText?.simpleText || '0:00';
+        const durationParts = durationText.split(':');
+        let durationSeconds = 0;
+        if (durationParts.length === 2) {
+          durationSeconds = parseInt(durationParts[0]) * 60 + parseInt(durationParts[1]);
+        } else if (durationParts.length === 3) {
+          durationSeconds = parseInt(durationParts[0]) * 3600 + parseInt(durationParts[1]) * 60 + parseInt(durationParts[2]);
+        }
 
-    return {
-      id: video.id,
-      title: video.title || 'Unknown',
-      duration: video.duration || 0,
-      thumbnail: video.thumbnail?.url || video.thumbnails?.[0]?.url || '',
-      url: `https://www.youtube.com/watch?v=${video.id}`,
-    };
+        console.log(`[SEARCH] Ditemukan: ${video.title?.runs?.[0]?.text} (${durationText})`);
+
+        return {
+          id: video.videoId,
+          title: video.title?.runs?.[0]?.text || 'Unknown',
+          duration: durationSeconds,
+          thumbnail: video.thumbnail?.thumbnails?.[video.thumbnail.thumbnails.length - 1]?.url || '',
+          url: `https://www.youtube.com/watch?v=${video.videoId}`,
+        };
+      }
+    }
+
+    throw new Error('Gak ada video ditemukan');
   } catch (err) {
     throw new Error(`Gagal cari video: ${err.message}`);
   }
@@ -64,7 +155,6 @@ async function downloadAudio(query) {
     dlChunkSize: 0,
   });
 
-  // Simpan ke file
   const writable = fs.createWriteStream(filePath);
 
   return new Promise((resolve, reject) => {
@@ -85,16 +175,16 @@ async function downloadAudio(query) {
           reject(new Error('File audio kosong setelah download'));
         }
       } else {
-        reject(new Error('File audio gak ditemukan setelah download'));
+        reject(new Error('File audio gak ditemukan'));
       }
     });
 
     stream.on('error', (err) => {
-      reject(new Error(`Gagal download audio: ${err.message}`));
+      reject(new Error(`Gagal download: ${err.message}`));
     });
 
     writable.on('error', (err) => {
-      reject(new Error(`Gagal simpan file: ${err.message}`));
+      reject(new Error(`Gagal simpan: ${err.message}`));
     });
   });
 }
@@ -109,7 +199,7 @@ function cleanupFile(filePath) {
       console.log(`[CLEANUP] File dihapus: ${filePath}`);
     }
   } catch (err) {
-    console.error(`[CLEANUP ERROR] Gagal hapus file: ${err.message}`);
+    console.error(`[CLEANUP ERROR] ${err.message}`);
   }
 }
 
