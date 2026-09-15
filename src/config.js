@@ -7,12 +7,6 @@ module.exports = {
   // Max audio duration (seconds)
   maxDuration: parseInt(process.env.MAX_DURATION) || 600,
 
-  // yt-dlp binary path
-  ytdlpPath: process.env.YTDLP_PATH || '/home/fachri/bin/yt-dlp',
-
-  // ffmpeg & ffprobe path (buat convert audio)
-  ffmpegPath: process.env.FFMPEG_PATH || '/home/fachri/bin/ffmpeg',
-
   // YouTube cookies file (optional)
   cookiesFile: process.env.COOKIES_FILE || '',
 
@@ -27,10 +21,4 @@ module.exports = {
 
   // Temp folder for downloads
   tempFolder: './temp',
-
-  // Commands list
-  commands: {
-    play: 'play',
-    help: 'help',
-  },
 };

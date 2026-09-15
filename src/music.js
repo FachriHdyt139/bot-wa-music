@@ -1,4 +1,4 @@
-const { execFile } = require('child_process');
+const ytdl = require('@distube/ytdl-core');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
@@ -8,175 +8,35 @@ if (!fs.existsSync(config.tempFolder)) {
   fs.mkdirSync(config.tempFolder, { recursive: true });
 }
 
-// User-Agent palsu biar kaya browser beneran
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
 /**
- * Convert JSON cookies ke Netscape format
- */
-function convertCookiesToNetscape(jsonCookiePath) {
-  const netscapePath = jsonCookiePath.replace('.txt', '_netscape.txt');
-
-  if (fs.existsSync(netscapePath)) {
-    return netscapePath;
-  }
-
-  try {
-    const rawData = fs.readFileSync(jsonCookiePath, 'utf8');
-    const cookies = JSON.parse(rawData);
-
-    let netscape = '# Netscape HTTP Cookie File\n';
-    netscape += '# https://curl.se/docs/http-cookies.html\n\n';
-
-    for (const cookie of cookies) {
-      const domain = cookie.domain || '';
-      const flag = domain.startsWith('.') ? 'TRUE' : 'FALSE';
-      const cookiePath = cookie.path || '/';
-      const secure = cookie.secure ? 'TRUE' : 'FALSE';
-      const expiration = cookie.expirationDate
-        ? Math.floor(cookie.expirationDate)
-        : 0;
-      const name = cookie.name || '';
-      const value = cookie.value || '';
-
-      netscape += `${domain}\t${flag}\t${cookiePath}\t${secure}\t${expiration}\t${name}\t${value}\n`;
-    }
-
-    fs.writeFileSync(netscapePath, netscape, 'utf8');
-    console.log(`[COOKIES] Converted JSON -> Netscape: ${netscapePath}`);
-    return netscapePath;
-  } catch (err) {
-    console.error(`[COOKIES ERROR] Gagal convert: ${err.message}`);
-    return null;
-  }
-}
-
-/**
- * Hapus cookies Netscape lama biar di-regenerate
- */
-function refreshCookies() {
-  if (!config.cookiesFile) return;
-  const netscapePath = config.cookiesFile.replace('.txt', '_netscape.txt');
-  if (fs.existsSync(netscapePath)) {
-    fs.unlinkSync(netscapePath);
-    console.log(`[COOKIES] Deleted old Netscape cookies, will regenerate`);
-  }
-}
-
-/**
- * Get cookies path (auto-convert kalau JSON format)
- */
-function getCookiesPath() {
-  if (!config.cookiesFile || !fs.existsSync(config.cookiesFile)) {
-    return null;
-  }
-
-  const content = fs.readFileSync(config.cookiesFile, 'utf8').trim();
-  if (content.startsWith('[') || content.startsWith('{')) {
-    return convertCookiesToNetscape(config.cookiesFile);
-  }
-
-  return config.cookiesFile;
-}
-
-/**
- * Build common yt-dlp args (anti-bot)
- */
-function buildBaseArgs() {
-  return [
-    '--no-warnings',
-    '--no-playlist',
-    '--no-check-certificates',
-    '--user-agent', USER_AGENT,
-    '--ffmpeg-location', path.dirname(config.ffmpegPath),
-  ];
-}
-
-/**
- * Tambah cookies ke args kalau ada
- */
-function addCookiesToArgs(args) {
-  const cookiesPath = getCookiesPath();
-  if (cookiesPath) {
-    args.push('--cookies', cookiesPath);
-  }
-  return args;
-}
-
-/**
- * Jalankan yt-dlp dengan retry
- */
-function runYtDlp(baseArgs, timeout) {
-  return new Promise((resolve, reject) => {
-    let lastError = null;
-    let attempt = 0;
-    const maxRetry = 2;
-
-    function tryRun() {
-      attempt++;
-      const args = [...baseArgs];
-      console.log(`[YTDLP] Attempt ${attempt}/${maxRetry}`);
-
-      execFile(config.ytdlpPath, args, { timeout }, (error, stdout, stderr) => {
-        if (error) {
-          lastError = error;
-          console.log(`[YTDLP] Error: ${(stderr || error.message).substring(0, 100)}`);
-
-          if (attempt < maxRetry) {
-            console.log(`[YTDLP] Retry ${attempt + 1}/${maxRetry}...`);
-            setTimeout(tryRun, 2000 * attempt);
-            return;
-          }
-
-          reject(new Error(`Gagal setelah ${maxRetry} percobaan: ${lastError.message}`));
-          return;
-        }
-
-        resolve(stdout);
-      });
-    }
-
-    tryRun();
-  });
-}
-
-/**
- * Cari video di YouTube
+ * Cari info video dari YouTube berdasarkan query
+ * Pake ytdl-core (Node.js native, gak perlu yt-dlp!)
  */
 async function searchYouTube(query) {
-  const args = buildBaseArgs();
-  args.push(
-    `ytsearch1:${query}`,
-    '--flat-playlist',
-    '--no-download',
-    '--print', '%(id)s|||%(title)s|||%(duration)s|||%(thumbnail)s|||%(webpage_url)s',
-  );
-  addCookiesToArgs(args);
+  try {
+    // Cari video pake ytdl
+    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const info = await ytdl.getInfo(searchUrl);
 
-  const stdout = await runYtDlp(args, 30000);
-  const output = stdout.trim();
+    if (!info || !info.videoDetails) {
+      throw new Error('Gak ada hasil ditemukan untuk query itu, Bro!');
+    }
 
-  if (!output) {
-    throw new Error('Gak ada hasil ditemukan untuk query itu, Bro!');
+    const details = info.videoDetails;
+    return {
+      id: details.videoId,
+      title: details.title,
+      duration: parseInt(details.lengthSeconds) || 0,
+      thumbnail: details.thumbnails?.[0]?.url || '',
+      url: details.videoUrl || `https://www.youtube.com/watch?v=${details.videoId}`,
+    };
+  } catch (err) {
+    throw new Error(`Gagal cari video: ${err.message}`);
   }
-
-  const parts = output.split('|||');
-  if (parts.length < 5) {
-    throw new Error('Format output gak valid');
-  }
-
-  return {
-    id: parts[0],
-    title: parts[1],
-    duration: parseInt(parts[2]) || 0,
-    thumbnail: parts[3],
-    url: parts[4],
-  };
 }
 
 /**
- * Download audio dari YouTube
+ * Download audio dari YouTube pake ytdl-core
  */
 async function downloadAudio(query) {
   // Step 1: Cari video dulu
@@ -191,43 +51,49 @@ async function downloadAudio(query) {
   const filename = `audio_${Date.now()}_${videoInfo.id}.mp3`;
   const filePath = path.join(config.tempFolder, filename);
 
-  // Step 4: Download audio
-  const args = buildBaseArgs();
-  args.push(
-    videoInfo.url,
-    '-x',
-    '--audio-format', 'mp3',
-    '--audio-quality', '128K',
-    '-o', filePath,
-    '--prefer-free-formats',
-  );
-  addCookiesToArgs(args);
+  // Step 4: Download audio pake ytdl-core
+  const videoUrl = `https://www.youtube.com/watch?v=${videoInfo.id}`;
 
-  await runYtDlp(args, 120000);
+  const stream = ytdl(videoUrl, {
+    quality: 'highestaudio',
+    filter: 'audioonly',
+    dlChunkSize: 0,
+  });
 
-  // Cek file exist
-  if (!fs.existsSync(filePath)) {
-    const files = fs.readdirSync(config.tempFolder)
-      .filter(f => f.includes(videoInfo.id))
-      .map(f => path.join(config.tempFolder, f));
+  // Simpan ke file
+  const writable = fs.createWriteStream(filePath);
 
-    if (files.length > 0) {
-      return {
-        filePath: files[0],
-        title: videoInfo.title,
-        duration: videoInfo.duration,
-        url: videoInfo.url,
-      };
-    }
-    throw new Error('File audio gak ditemukan setelah download');
-  }
+  return new Promise((resolve, reject) => {
+    stream.pipe(writable);
 
-  return {
-    filePath,
-    title: videoInfo.title,
-    duration: videoInfo.duration,
-    url: videoInfo.url,
-  };
+    writable.on('finish', () => {
+      // Cek file exist dan ada isinya
+      if (fs.existsSync(filePath)) {
+        const stats = fs.statSync(filePath);
+        if (stats.size > 0) {
+          console.log(`[DOWNLOAD] File saved: ${filePath} (${stats.size} bytes)`);
+          resolve({
+            filePath,
+            title: videoInfo.title,
+            duration: videoInfo.duration,
+            url: videoInfo.url,
+          });
+        } else {
+          reject(new Error('File audio kosong setelah download'));
+        }
+      } else {
+        reject(new Error('File audio gak ditemukan setelah download'));
+      }
+    });
+
+    stream.on('error', (err) => {
+      reject(new Error(`Gagal download audio: ${err.message}`));
+    });
+
+    writable.on('error', (err) => {
+      reject(new Error(`Gagal simpan file: ${err.message}`));
+    });
+  });
 }
 
 /**
@@ -258,6 +124,4 @@ module.exports = {
   downloadAudio,
   cleanupFile,
   formatDuration,
-  getCookiesPath,
-  convertCookiesToNetscape,
 };
