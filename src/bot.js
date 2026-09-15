@@ -1,5 +1,6 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const path = require('path');
 const config = require('./config');
 const { downloadAudio, cleanupFile, formatDuration } = require('./music');
 
@@ -8,16 +9,13 @@ const downloading = new Set();
 
 // Status bot buat web page
 let botStatus = {
-  state: 'initializing', // initializing, qr, pairing, ready, disconnected
+  state: 'initializing',
   pairingCode: null,
-  phoneNumber: null,
+  qr: null,
   uptime: 0,
   lastActivity: null,
 };
 
-/**
- * Get bot status (buat web page)
- */
 function getBotStatus() {
   return {
     ...botStatus,
@@ -27,76 +25,106 @@ function getBotStatus() {
 }
 
 /**
- * Get Chromium instance berdasarkan environment
+ * Start WhatsApp Bot pake Baileys (Gak perlu Chrome!)
  */
-async function getChromium() {
-  const isRender = !!process.env.RENDER;
+async function startBot() {
+  // Auth state - simpan session di folder
+  const { state, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
 
-  if (isRender) {
-    // Render: pake @sparticuz/chromium (serverless-friendly)
-    const chromium = require('@sparticuz/chromium');
-    console.log('[CHROME] Render mode - Using @sparticuz/chromium');
-    return {
-      executablePath: await chromium.executablePath(),
-      args: chromium.args,
-    };
-  } else {
-    // Local: pake Chrome yang udah terinstall
-    const CHROME_PATH = process.env.CHROME_PATH || '/snap/bin/chromium';
-    console.log(`[CHROME] Local mode - Using: ${CHROME_PATH}`);
-    return {
-      executablePath: CHROME_PATH,
-      args: [],
-    };
-  }
-}
+  // Fetch versi terbaru WhatsApp Web
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  console.log(`[WA] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
-/**
- * Inisialisasi WhatsApp Client
- */
-async function createClient() {
-  const chromium = await getChromium();
-
-  const client = new Client({
-    authStrategy: new LocalAuth({
-      dataPath: './.wwebjs_auth',
-    }),
-    puppeteer: {
-      headless: true,
-      executablePath: chromium.executablePath,
-      args: [
-        ...chromium.args,
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-      ],
+  // Buat socket
+  const sock = makeWASocket({
+    version,
+    logger: pino({ level: 'silent' }),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
+    printQRInTerminal: false, // Kita pake pairing code, bukan QR
+    generateHighQualityLinkPreview: false,
   });
 
-  return client;
+  // === Save credentials saat update ===
+  sock.ev.on('creds.update', saveCreds);
+
+  // === Connection Update ===
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      botStatus.state = 'qr';
+      botStatus.qr = qr;
+      console.log('\n📱 QR Code available - Scan via WhatsApp!');
+      const qrcode = require('qrcode-terminal');
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === 'close') {
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log(`[WA] Connection closed. Reason: ${reason}`);
+
+      if (reason !== DisconnectReason.loggedOut) {
+        console.log('[WA] Reconnecting...');
+        botStatus.state = 'reconnecting';
+        setTimeout(() => startBot(), 3000);
+      } else {
+        console.log('[WA] Logged out. Delete .wwebjs_auth and restart.');
+        botStatus.state = 'disconnected';
+      }
+    }
+
+    if (connection === 'connecting') {
+      botStatus.state = 'connecting';
+      console.log('[WA] Connecting to WhatsApp...');
+    }
+
+    if (connection === 'open') {
+      botStatus.state = 'ready';
+      botStatus.lastActivity = new Date().toISOString();
+      console.log('═══════════════════════════════════════');
+      console.log('  🎵 BOT WHATSAPP MUSIC SIAP! 🎵');
+      console.log('═══════════════════════════════════════');
+      console.log(`  ✅ Bot udah online!`);
+      console.log(`  📌 Prefix: "${config.prefix}"`);
+      console.log(`  🎧 Ketik: ${config.prefix}play <nama lagu>`);
+      console.log(`  ❓ Bantuan: ${config.prefix}help`);
+      console.log('═══════════════════════════════════════\n');
+    }
+  });
+
+  // === Message Handler ===
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      botStatus.lastActivity = new Date().toISOString();
+
+      // Skip kalau dari bot sendiri
+      if (msg.key.fromMe) continue;
+
+      // Skip kalau gak ada message
+      if (!msg.message) continue;
+
+      try {
+        await handleMessage(sock, msg);
+      } catch (err) {
+        console.error('[ERROR]', err.message);
+      }
+    }
+  });
+
+  return sock;
 }
 
 /**
- * Setup event handlers
+ * Request Pairing Code
  */
-function setupBot(client) {
-
-  // === QR Code Handler (untuk local testing) ===
-  client.on('qr', (qr) => {
-    botStatus.state = 'qr';
-    console.log('\n📱 Scan QR Code ini pake WhatsApp lu, Bro!\n');
-    qrcode.generate(qr, { small: true });
-    console.log('\n⏳ Tunggu scan...\n');
-  });
-
-  // === Pairing Code Handler (untuk Render/headless) ===
-  client.on('pairing_code', (code) => {
+async function requestPairingCode(sock, phoneNumber) {
+  try {
+    const code = await sock.requestPairingCode(phoneNumber);
     botStatus.state = 'pairing';
     botStatus.pairingCode = code;
     console.log('\n═══════════════════════════════════════');
@@ -110,135 +138,102 @@ function setupBot(client) {
     console.log('  3. Tap "Link with Phone Number Instead"');
     console.log('  4. Masukkan kode di atas');
     console.log('═══════════════════════════════════════\n');
-  });
-
-  // === Ready Handler ===
-  client.on('ready', async () => {
-    botStatus.state = 'ready';
-    botStatus.lastActivity = new Date().toISOString();
-    console.log('═══════════════════════════════════════');
-    console.log('  🎵 BOT WHATSAPP MUSIC SIAP! 🎵');
-    console.log('═══════════════════════════════════════');
-    console.log(`  ✅ Bot udah online!`);
-    console.log(`  📌 Prefix: "${config.prefix}"`);
-    console.log(`  🎧 Ketik: ${config.prefix}play <nama lagu>`);
-    console.log(`  ❓ Bantuan: ${config.prefix}help`);
-    console.log('═══════════════════════════════════════\n');
-
-    // Kalau pairing mode aktif, request pairing code
-    if (config.pairingMode === 'pairing' && config.pairingPhone) {
-      try {
-        console.log(`[PAIRING] Requesting pairing code for ${config.pairingPhone}...`);
-        const code = await client.requestPairingCode(config.pairingPhone);
-        console.log(`[PAIRING] Pairing code received!`);
-      } catch (err) {
-        console.error(`[PAIRING ERROR] Gagal request pairing code: ${err.message}`);
-      }
-    }
-  });
-
-  // === Auth Failure Handler ===
-  client.on('auth_failure', (msg) => {
-    botStatus.state = 'disconnected';
-    console.error('❌ Auth gagal! Hapus folder .wwebjs_auth terus coba lagi.');
-    console.error('Detail:', msg);
-  });
-
-  // === Disconnected Handler ===
-  client.on('disconnected', (reason) => {
-    botStatus.state = 'disconnected';
-    console.log('⚠️  Bot disconnected:', reason);
-    console.log('🔄 Mereconnect...');
-  });
-
-  // === Message Handler ===
-  client.on('message', async (msg) => {
-    botStatus.lastActivity = new Date().toISOString();
-    try {
-      await handleMessage(client, msg);
-    } catch (err) {
-      console.error('[ERROR]', err.message);
-    }
-  });
-
-  return client;
+    return code;
+  } catch (err) {
+    console.error('[PAIRING ERROR]', err.message);
+    return null;
+  }
 }
 
 /**
  * Handle incoming message
  */
-async function handleMessage(client, msg) {
-  const body = msg.body.trim();
-  const prefix = config.prefix;
+async function handleMessage(sock, msg) {
+  const body = getMessageBody(msg);
+  if (!body) return;
 
-  // Skip kalau bukan command
+  const prefix = config.prefix;
   if (!body.startsWith(prefix)) return;
 
-  // Skip kalau dari bot sendiri
-  if (msg.fromMe) return;
-
-  // Parse command
+  const from = msg.key.remoteJid;
   const fullCommand = body.slice(prefix.length).trim();
   const command = fullCommand.split(' ')[0].toLowerCase();
   const args = fullCommand.slice(command.length).trim();
 
-  console.log(`[CMD] ${msg.from}: ${prefix}${command} ${args}`);
+  console.log(`[CMD] ${from}: ${prefix}${command} ${args}`);
 
   // === COMMAND: HELP ===
   if (command === 'help' || command === 'menu' || command === 'start') {
-    await sendHelp(client, msg);
+    await sendHelp(sock, from);
     return;
   }
 
   // === COMMAND: PLAY ===
   if (command === 'play' || command === 'p') {
     if (!args) {
-      await msg.reply(
-        `❌ *Format salah!*\n\n` +
-        `Cara pakai:\n` +
-        `${prefix}play <nama lagu>\n\n` +
-        `Contoh:\n` +
-        `${prefix}play dangdut koplo viral\n` +
-        `${prefix}p arsenal vs man city\n`
-      );
+      await sock.sendMessage(from, {
+        text:
+          `❌ *Format salah!*\n\n` +
+          `Cara pakai:\n` +
+          `${prefix}play <nama lagu>\n\n` +
+          `Contoh:\n` +
+          `${prefix}play dangdut koplo viral\n` +
+          `${prefix}p arsenal vs man city\n`
+      });
       return;
     }
-
-    await handlePlay(client, msg, args);
+    await handlePlay(sock, from, args);
     return;
   }
 
   // === COMMAND: STOP ===
   if (command === 'stop') {
-    await msg.reply('🛑 Oke Bro, fitur stop belum tersedia. Bot tetap running!');
+    await sock.sendMessage(from, { text: '🛑 Oke Bro, fitur stop belum tersedia!' });
     return;
   }
 }
 
 /**
+ * Extract message body dari berbagai tipe pesan
+ */
+function getMessageBody(msg) {
+  const m = msg.message;
+  if (!m) return null;
+
+  // Text biasa
+  if (m.conversation) return m.conversation;
+  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+  if (m.ecommerceMessage?.text) return m.ecommerceMessage.text;
+
+  // Caption dari media
+  if (m.imageMessage?.caption) return m.imageMessage.caption;
+  if (m.videoMessage?.caption) return m.videoMessage.caption;
+
+  return null;
+}
+
+/**
  * Handle perintah play
  */
-async function handlePlay(client, msg, query) {
-  const chatId = msg.from;
-
-  // Cek apakah sedang download (anti-spam)
-  if (downloading.has(chatId)) {
-    await msg.reply('⏳ *Sabar Bro!* Lu lagi proses download nih. Tunggu sampe selesai dulu ya...');
+async function handlePlay(sock, from, query) {
+  if (downloading.has(from)) {
+    await sock.sendMessage(from, {
+      text: '⏳ *Sabar Bro!* Lu lagi proses download nih. Tunggu sampe selesai dulu ya...'
+    });
     return;
   }
 
-  // Tandai sedang proses
-  downloading.add(chatId);
-
+  downloading.add(from);
   let filePath = null;
 
   try {
     // Kirim pesan "searching"
-    await client.sendMessage(chatId,
-      `🔍 *Cari lagu...*\n\n` +
-      `📝 Query: *${query}*\n` +
-      `⏳ Tunggu bentar ya Bro...`
-    );
+    await sock.sendMessage(from, {
+      text:
+        `🔍 *Cari lagu...*\n\n` +
+        `📝 Query: *${query}*\n` +
+        `⏳ Tunggu bentar ya Bro...`
+    });
 
     console.log(`[DOWNLOAD] Memulai download: ${query}`);
 
@@ -249,80 +244,85 @@ async function handlePlay(client, msg, query) {
     console.log(`[DOWNLOAD] Selesai: ${result.title} (${formatDuration(result.duration)})`);
 
     // Kirim pesan info lagu
-    await client.sendMessage(chatId,
-      `✅ *Lagu ketemu!*\n\n` +
-      `🎵 *${result.title}*\n` +
-      `⏱️ Durasi: ${formatDuration(result.duration)}\n` +
-      `📥 Lagi dikirim nih, sabar...`
-    );
-
-    // Kirim file audio
-    const media = await MessageMedia.fromFilePath(filePath);
-    await client.sendMessage(chatId, media, {
-      caption: `🎵 *${result.title}*\n\n` +
-               `📎 Source: ${result.url}\n` +
-               `⏱️ Duration: ${formatDuration(result.duration)}\n\n` +
-               `_Dikirim oleh Bot Music 🤖_`,
+    await sock.sendMessage(from, {
+      text:
+        `✅ *Lagu ketemu!*\n\n` +
+        `🎵 *${result.title}*\n` +
+        `⏱️ Durasi: ${formatDuration(result.duration)}\n` +
+        `📥 Lagi dikirim nih, sabar...`
     });
 
-    console.log(`[SEND] Audio terkirim ke ${chatId}`);
+    // Kirim file audio
+    const fs = require('fs');
+    const audioBuffer = fs.readFileSync(filePath);
+    await sock.sendMessage(from, {
+      audio: audioBuffer,
+      mimetype: 'audio/mpeg',
+      ptt: false,
+    });
 
-    // Cleanup file setelah dikirim (delay 3 detik biar WA sempet proses)
+    // Kirim caption
+    await sock.sendMessage(from, {
+      text:
+        `🎵 *${result.title}*\n\n` +
+        `📎 Source: ${result.url}\n` +
+        `⏱️ Duration: ${formatDuration(result.duration)}\n\n` +
+        `_Dikirim oleh Bot Music 🤖_`
+    });
+
+    console.log(`[SEND] Audio terkirim ke ${from}`);
+
+    // Cleanup file setelah dikirim
     setTimeout(() => {
       cleanupFile(filePath);
     }, 3000);
 
   } catch (err) {
     console.error(`[ERROR] Play gagal: ${err.message}`);
+    await sock.sendMessage(from, {
+      text:
+        `❌ *Gagal play lagu!*\n\n` +
+        `🔍 Query: *${query}*\n` +
+        `💬 Error: ${err.message}\n\n` +
+        `💡 *Tips:*\n` +
+        `• Coba pake judul yang lebih spesifik\n` +
+        `• Pastikan judul bisa dicari di YouTube`
+    });
 
-    await msg.reply(
-      `❌ *Gagal play lagu!*\n\n` +
-      `🔍 Query: *${query}*\n` +
-      `💬 Error: ${err.message}\n\n` +
-      `💡 *Tips:*\n` +
-      `• Coba pake judul lagu yang lebih spesifik\n` +
-      `• Pastikan judul lagu bener dan bisa dicari di YouTube\n` +
-      `• Kalau sering gagal, coba tambahin nama artist`
-    );
-
-    // Cleanup file kalau error
-    if (filePath) {
-      cleanupFile(filePath);
-    }
+    if (filePath) cleanupFile(filePath);
   } finally {
-    // Hapus track download
-    downloading.delete(chatId);
+    downloading.delete(from);
   }
 }
 
 /**
- * Kirim pesan help/menu
+ * Kirim pesan help
  */
-async function sendHelp(client, msg) {
+async function sendHelp(sock, from) {
   const prefix = config.prefix;
-  const helpText =
-    `🎵 *BOT WHATSAPP MUSIC* 🎵\n\n` +
-    `Halo Bro! Gue bot yang bisa puterin lagu dari YouTube. 🎧\n\n` +
-    `══════════════════════════════\n` +
-    `📌 *DAFTAR COMMAND:*\n` +
-    `══════════════════════════════\n\n` +
-    `🎶 *${prefix}play <nama lagu>*\n` +
-    `   Puterin lagu berdasarkan judul/keyword\n` +
-    `   Contoh: ${prefix}play dangdut koplo viral\n\n` +
-    `🎶 *${prefix}p <nama lagu>*\n` +
-    `   Shortcut dari .play\n\n` +
-    `❓ *${prefix}help*\n` +
-    `   Tampilkan pesan bantuan ini\n\n` +
-    `══════════════════════════════\n` +
-    `💡 *TIPS:*\n` +
-    `══════════════════════════════\n\n` +
-    `• Pake judul spesifik biar hasilnya akurat\n` +
-    `• Contoh: ${prefix}play armada haruskah aku mati\n\n` +
-    `• Max durasi lagu: ${config.maxDuration} detik (${Math.floor(config.maxDuration/60)} menit)\n\n` +
-    `══════════════════════════════\n` +
-    `🤖 _Bot Music v1.0 - Gratis & Open Source_`;
-
-  await msg.reply(helpText);
+  await sock.sendMessage(from, {
+    text:
+      `🎵 *BOT WHATSAPP MUSIC* 🎵\n\n` +
+      `Halo Bro! Gue bot yang bisa puterin lagu dari YouTube. 🎧\n\n` +
+      `══════════════════════════════\n` +
+      `📌 *DAFTAR COMMAND:*\n` +
+      `══════════════════════════════\n\n` +
+      `🎶 *${prefix}play <nama lagu>*\n` +
+      `   Puterin lagu berdasarkan judul/keyword\n` +
+      `   Contoh: ${prefix}play dangdut koplo viral\n\n` +
+      `🎶 *${prefix}p <nama lagu>*\n` +
+      `   Shortcut dari .play\n\n` +
+      `❓ *${prefix}help*\n` +
+      `   Tampilkan pesan bantuan ini\n\n` +
+      `══════════════════════════════\n` +
+      `💡 *TIPS:*\n` +
+      `══════════════════════════════\n\n` +
+      `• Pake judul spesifik biar hasilnya akurat\n` +
+      `• Contoh: ${prefix}play armada haruskah aku mati\n\n` +
+      `• Max durasi: ${config.maxDuration} detik (${Math.floor(config.maxDuration/60)} menit)\n\n` +
+      `══════════════════════════════\n` +
+      `🤖 _Bot Music v2.0 - Gratis & Open Source_`
+  });
 }
 
-module.exports = { createClient, setupBot, getBotStatus };
+module.exports = { startBot, requestPairingCode, getBotStatus };

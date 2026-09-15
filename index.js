@@ -1,33 +1,27 @@
 /**
- * 🎵 BOT WHATSAPP MUSIC 🎵
+ * 🎵 BOT WHATSAPP MUSIC v2.0 🎵
  * 
  * WhatsApp Bot untuk play musik dari YouTube
+ * Pake Baileys - GAK PERLU CHROME!
  * 
- * Fitur:
- * - Play music via command .play <nama lagu>
- * - YouTube search & download otomatis
- * - Kirim audio langsung ke chat WhatsApp
- * - Web server untuk Render deployment
- * - Pairing Code support (tanpa QR code!)
- * 
- * Author: Lu & Gue (Tim Nongkrong)
+ * Author: FachriHdyt139
  * License: MIT (100% Gratis!)
  */
 
 const express = require('express');
-const { createClient, setupBot, getBotStatus } = require('./src/bot');
+const { startBot, requestPairingCode, getBotStatus } = require('./src/bot');
 const config = require('./src/config');
 
 // ═══════════════════════════════════════════════
-// WEB SERVER (Buat Render Free Tier)
+// WEB SERVER
 // ═══════════════════════════════════════════════
 
 const app = express();
 const PORT = config.port;
-let whatsappClient = null;
+let whatsappSocket = null;
 
 // ═══════════════════════════════════════════════
-// WEB PAGES (HTML)
+// WEB STATUS PAGE
 // ═══════════════════════════════════════════════
 
 const STATUS_PAGE = `
@@ -68,8 +62,7 @@ const STATUS_PAGE = `
             margin-bottom: 20px;
             font-size: 14px;
         }
-        .status-initializing { background: #fff3cd; color: #856404; }
-        .status-qr { background: #cce5ff; color: #004085; }
+        .status-initializing, .status-connecting, .status-reconnecting { background: #fff3cd; color: #856404; }
         .status-pairing { background: #d4edda; color: #155724; }
         .status-ready { background: #d1ecf1; color: #0c5460; }
         .status-disconnected { background: #f8d7da; color: #721c24; }
@@ -126,11 +119,6 @@ const STATUS_PAGE = `
             font-size: 16px;
         }
         .btn:hover { transform: scale(1.05); }
-        .btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-        }
         .info {
             margin-top: 20px;
             padding: 15px;
@@ -185,8 +173,6 @@ const STATUS_PAGE = `
                     <li>Tunggu sampe bot online!</li>
                 </ol>
             </div>
-            
-            <button id="refresh-btn" class="btn" onclick="refreshPage()">🔄 Refresh Status</button>
         </div>
         
         <div id="ready-section" style="display:none;">
@@ -202,6 +188,7 @@ const STATUS_PAGE = `
             </div>
         </div>
         
+        <button class="btn" onclick="location.reload()">🔄 Refresh</button>
         <p class="refresh-note">Auto-refresh setiap 10 detik</p>
     </div>
 
@@ -219,7 +206,6 @@ const STATUS_PAGE = `
                 badge.className = 'status-badge status-' + data.state;
                 
                 switch(data.state) {
-                    case 'qr':
                     case 'pairing':
                         badge.textContent = '📲 Menunggu Pairing...';
                         pairingSection.style.display = 'block';
@@ -231,11 +217,16 @@ const STATUS_PAGE = `
                         pairingSection.style.display = 'none';
                         readySection.style.display = 'block';
                         break;
+                    case 'connecting':
+                    case 'reconnecting':
+                        badge.textContent = '🔄 Connecting...';
+                        pairingSection.style.display = 'none';
+                        readySection.style.display = 'none';
+                        break;
                     case 'disconnected':
                         badge.textContent = '❌ Disconnected';
-                        pairingSection.style.display = 'block';
+                        pairingSection.style.display = 'none';
                         readySection.style.display = 'none';
-                        pairingCode.textContent = '--------';
                         break;
                     default:
                         badge.textContent = '⏳ Initializing...';
@@ -245,10 +236,6 @@ const STATUS_PAGE = `
             } catch(err) {
                 console.error('Gagal fetch status:', err);
             }
-        }
-        
-        function refreshPage() {
-            updateStatus();
         }
         
         updateStatus();
@@ -262,46 +249,46 @@ const STATUS_PAGE = `
 // ROUTES
 // ═══════════════════════════════════════════════
 
-// Halaman utama - Status page
 app.get('/', (req, res) => {
   res.send(STATUS_PAGE);
 });
 
-// API Status (JSON)
 app.get('/api/status', (req, res) => {
   res.json(getBotStatus());
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 // ═══════════════════════════════════════════════
-// START WEB SERVER
+// START
 // ═══════════════════════════════════════════════
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Web server jalan di port ${PORT}`);
-  console.log(`🌐 Buka http://localhost:${PORT} buat lihat status bot`);
 });
 
 // ═══════════════════════════════════════════════
 // WHATSAPP BOT
 // ═══════════════════════════════════════════════
 
-console.log('\n🚀 Starting WhatsApp Music Bot...\n');
+console.log('\n🚀 Starting WhatsApp Music Bot v2.0 (Baileys - No Chrome!)...\n');
 
-// Inisialisasi client (async karena butuh Chromium path)
 (async () => {
   try {
-    whatsappClient = await createClient();
-    setupBot(whatsappClient);
-    console.log('📡 Menghubungkan ke WhatsApp...\n');
-    await whatsappClient.initialize();
+    // Start bot
+    whatsappSocket = await startBot();
+
+    // Request pairing code kalau mode pairing
+    if (config.pairingMode === 'pairing' && config.pairingPhone) {
+      // Tunggu sebentar biar koneksi stabil
+      setTimeout(async () => {
+        await requestPairingCode(whatsappSocket, config.pairingPhone);
+      }, 5000);
+    }
   } catch (err) {
-    console.error('❌ Gagal inisialisasi bot:', err.message);
-    process.exit(1);
+    console.error('❌ Gagal start bot:', err.message);
   }
 })();
 
@@ -309,33 +296,16 @@ console.log('\n🚀 Starting WhatsApp Music Bot...\n');
 // GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════════
 
-process.on('SIGINT', async () => {
+process.on('SIGINT', () => {
   console.log('\n🛑 Shutdown bot...');
-  try {
-    await whatsappClient.destroy();
-    console.log('✅ Bot berhasil dimatikan. Dadah Bro! 👋');
-  } catch (err) {
-    console.error('❌ Error saat shutdown:', err.message);
-  }
   process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
+process.on('SIGTERM', () => {
   console.log('\n🛑 Shutdown bot (SIGTERM)...');
-  try {
-    await whatsappClient.destroy();
-    console.log('✅ Bot berhasil dimatikan.');
-  } catch (err) {
-    console.error('❌ Error saat shutdown:', err.message);
-  }
   process.exit(0);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.error('[UNHANDLED REJECTION]', reason);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT EXCEPTION]', err);
-  process.exit(1);
 });
